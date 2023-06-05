@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.23)
 
 project(examples VERSION 1.0.0.0)
 
@@ -17,5 +17,8 @@ add_subdirectory(eos-vm)
 
 add_executable(driver src/main.cpp)
 target_link_libraries(driver eos-vm)
+
+add_executable(test_driver src/test_driver.cpp)
+target_link_libraries(test_driver eos-vm)
 
 add_subdirectory(contracts)
