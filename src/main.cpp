@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
 
       // static analysis
       static_analysis sa;
-      for (std::size_t i=0; i < bkend.get_module().code.size(); ++i) {
+      for(std::size_t i=0; i < bkend.get_module().code.size(); ++i) {
          const auto& body = bkend.get_module().code[i];
 
          for (std::size_t j=0; j < body.size; ++j) {

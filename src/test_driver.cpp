@@ -59,9 +59,10 @@ EOS_VM_PRECONDITION(test_name,
             throw "failure";
    }))
 
-eosio::vm::guarded_vector<uint8_t>* find_export_name(eosio::vm::module& mod, uint32_t idx) {
+eosio::vm::guarded_vector<uint8_t>* find_export_name(const module& mod, uint32_t idx) {
     if(mod.names && mod.names->function_names) {
         for(uint32_t i = 0; i < mod.names->function_names->size(); ++i) {
+            auto test = (*mod.names->function_names)[i].idx;
             if((*mod.names->function_names)[i].idx == idx) {
                 return &(*mod.names->function_names)[i].name;
             }
@@ -74,7 +75,19 @@ eosio::vm::guarded_vector<uint8_t>* find_export_name(eosio::vm::module& mod, uin
     }
     return nullptr;
 }
+/*
+std::string get_func_name(const module & mod, uint32_t idx) {
+    if (guarded_vector<uint8_t> *name = find_export_name(mod, idx)) {
+        return std::string(reinterpret_cast<const char *>(name->raw()), name->size());
+    }
+    else {
+        return std::string("fn" + std::to_string(idx));
+    }
+}
+*/
 
+std::unordered_map<int, std::string> function_names;
+// std::vector<std::string> function_names;
 
 struct stats_t {
    // key opcode, value count
@@ -82,7 +95,7 @@ struct stats_t {
    // key index, value count (index of the function in function table)
    std::unordered_map<int, int> calls_count;
 
-   void print () {
+   void print(const module & mod) {
        opcode_utils u;
        cout << "Statistics of operations: \n";
        for(auto i: ops_count) {
@@ -90,13 +103,13 @@ struct stats_t {
        }
        cout << "Statistics of function calls: \n";
        for(auto i: calls_count) {
-           cout << "function index: " /* << "name: " << find_export_name(mod) */ << i.first << " count: " << i.second << endl;
+           cout << "function index: " << i.first << " name: " << function_names[i.first] << " count: " << i.second << endl;
        }
    }
 } stats;
 
 
-#define DBG_CALL_VISIT(name, code)                                                                                          \
+#define DBG_CALL_VISIT(name, code)                                                                                     \
    void operator()(const EOS_VM_OPCODE_T(name)& op) {                                                                  \
       call_t call;                                                                                                     \
       std::cout << "Found " << #name << " at " << get_context().get_pc() << "\n";                                      \
@@ -104,27 +117,32 @@ struct stats_t {
       get_context().print_stack();                                                                                     \
       stats.ops_count[op.opcode] ++;                                                                                   \
       if(op.opcode == call.opcode)  {                                                                                  \
+        curr_func = op.index;                                                                                          \
         stats.calls_count[op.index] ++;                                                                                \
-      }                                         \
+      }                                                                                                                \
    }
 
 
 #define DBG_VISIT(name, code)                                                                                          \
    void operator()(const EOS_VM_OPCODE_T(name)& op) {                                                                  \
-      call_t call;                                                                                                     \
       std::cout << "Found " << #name << " at " << get_context().get_pc() << "\n";                                      \
       interpret_visitor<ExecutionCTX>::operator()(op);                                                                 \
       get_context().print_stack();                                                                                     \
       stats.ops_count[op.opcode] ++;                                                                                   \
    }
 
+#define DBG_RET_VISIT(name, code)                                                                                      \
+   void operator()(const EOS_VM_OPCODE_T(name)& op) { std::cout << "Found " << #name << "\n"; }
+
 template <typename ExecutionCTX>
 struct my_visitor : public interpret_visitor<ExecutionCTX> {
    using interpret_visitor<ExecutionCTX>::operator();
+   uint32_t curr_func = 0;
    my_visitor(ExecutionCTX& ctx) : interpret_visitor<ExecutionCTX>(ctx) {}
    ExecutionCTX& get_context() { return interpret_visitor<ExecutionCTX>::get_context(); }
    EOS_VM_CALL_OPS(DBG_CALL_VISIT)
    EOS_VM_MEMORY_OPS(DBG_VISIT)
+//   EOS_VM_RETURN_OP(DBG_RET_VISIT)
 };
 
 template <typename HostFunctions = std::nullptr_t, typename Impl = interpreter, typename Options = default_options, typename DebugInfo = null_debug_info>
@@ -172,11 +190,42 @@ class my_backend {
       ctx.execute(&host, my_visitor(ctx), func, args...);
       return true;
    }
+
+    inline module & get_module() { return mod; }
+
 };
 
 // Specific the backend with example_host_methods for host functions.
 using rhf_t     = eosio::vm::registered_host_functions<example_host_methods, execution_interface, cnv>;
 using my_backend_t = my_backend<rhf_t>;
+
+
+struct nm_debug_info {
+    using builder = nm_debug_info;
+    void on_code_start(const void* compiled_base, const void* wasm_code_start) {
+        wasm_base = wasm_code_start;
+    }
+    void on_function_start(const void* code_addr, const void* wasm_addr) {
+        function_offsets.push_back(static_cast<std::uint32_t>(reinterpret_cast<const char*>(wasm_addr) - reinterpret_cast<const char*>(wasm_base)));
+    }
+    void on_instr_start(const void* code_addr, const void* wasm_addr) {}
+    void on_code_end(const void* code_addr, const void* wasm_addr) {}
+    void set(nm_debug_info&& other) { *this = std::move(other); }
+    void relocate(const void*) {}
+
+    uint32_t get_function(std::uint32_t addr) {
+        auto pos = std::lower_bound(function_offsets.begin(), function_offsets.end(), addr + 1);
+        if(pos == function_offsets.begin()) return 0;
+        return (pos - function_offsets.begin()) - 1;
+    }
+    const void* wasm_base;
+    std::vector<uint32_t> function_offsets;
+};
+
+struct nm_options {
+    static constexpr bool parse_custom_section_name = true;
+};
+
 
 
 /**
@@ -209,26 +258,44 @@ int main(int argc, char** argv) {
    rhf_t::add<&example_host_methods::prints_l>("env", "prints_l");
 
 
-   watchdog wd{std::chrono::seconds(3)};
-   try {
-      example_host_methods ehm;
+    watchdog wd{std::chrono::seconds(3)};
 
-      std::cout << "loading test_wasm.wasm\n" << endl;
-      auto code = read_wasm("./test_wasm.wasm");
+    try {
 
+        std::cout << "loading test_wasm.wasm\n" << endl;
+        auto code = read_wasm("./test_wasm.wasm");
 
-      std::cout << "Instantiate a new backend using the wasm provided.\n" << endl;
-      // Instantiate a new backend using the wasm provided.
-      my_backend_t bkend( code, ehm, &wa );
+        nm_debug_info info;
+        module mod;
+        binary_parser<null_writer, nm_options, nm_debug_info> parser(mod.allocator);
+        parser.parse_module(code, mod, info);
+        {
+            for(std::size_t i = 0; i < info.function_offsets.size(); ++i) {
+                auto idx = i + mod.get_imported_functions_size();
+                if(guarded_vector<uint8_t>* name = find_export_name(mod, i + mod.get_imported_functions_size())) {
+                    auto n = (std::string(reinterpret_cast<const char*>(name->raw()), name->size()));
+                    //function_names.push_back(std::string(reinterpret_cast<const char*>(name->raw()), name->size()));
+                    function_names[idx] = n;
+                } else {
+                    auto n = ("fn" + std::to_string( i + mod.get_imported_functions_size()));
+                    //function_names.push_back("fn" + std::to_string( i + mod.get_imported_functions_size()));
+                    function_names[idx] = n;
+                }
+            }
+        }
 
-      std::cout << "Execute apply.\n" << endl;
-      // Instantiate a "host"
-      ehm.field = "testing";
-      // Execute apply.
-      bkend.call(ehm, "env", "apply", (uint64_t)0, (uint64_t)0, (uint64_t)0);
+        example_host_methods ehm;
 
-      stats.print();
+        std::cout << "Instantiate a new backend using the wasm provided.\n" << endl;
+        // Instantiate a new backend using the wasm provided.
+        my_backend_t bkend( code, ehm, &wa );
 
+        std::cout << "Execute apply.\n" << endl;
+        // Instantiate a "host"
+        ehm.field = "testing";
+        // Execute apply.
+        bkend.call(ehm, "env", "apply", (uint64_t)0, (uint64_t)0, (uint64_t)0);
+        stats.print(bkend.get_module());
    }
    catch ( const eosio::vm::exception& ex ) {
       std::cerr << ex.what() << " : " << ex.detail() <<  "\n";
