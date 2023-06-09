@@ -15,6 +15,8 @@ using namespace std;
 template <typename T, std::size_t Align = alignof(T)>
 using legacy_span = eosio::vm::argument_proxy<eosio::vm::span<T>, Align>;
 
+// set of functions exported to the wasm programs is declared in this struct
+// It is possible to call them from the wasm code (from contracts)
 struct example_host_methods {
    void print_num(uint64_t n) { std::cout << "Number : " << n << "\n"; }
    // example of a host "method"
@@ -40,10 +42,11 @@ struct example_host_methods {
    }
 
    void print_string(const char* s) {
-      std::cout << "print_string() was called\n" << s << endl;
+      std::cout << "\nprint_string() was called\n" << s << endl;
    }
 };
 
+// Set of function for conversion of data types between of the VM and wasm code.
 struct cnv : type_converter<example_host_methods> {
    using type_converter::type_converter;
    using type_converter::from_wasm;
@@ -59,6 +62,8 @@ EOS_VM_PRECONDITION(test_name,
             throw "failure";
    }))
 
+// Find a name of a function exported from a module by its index in functions table of the module
+// mod.names filling in process of the wasm parsing so if you use the interpreter only this list will be empty
 eosio::vm::guarded_vector<uint8_t>* find_export_name(const module& mod, uint32_t idx) {
     if(mod.names && mod.names->function_names) {
         for(uint32_t i = 0; i < mod.names->function_names->size(); ++i) {
@@ -76,17 +81,17 @@ eosio::vm::guarded_vector<uint8_t>* find_export_name(const module& mod, uint32_t
     return nullptr;
 }
 
-
+// A map which contains indixes and names of the functions in the module. It will be filled in process of the wasm parsing
 std::unordered_map<int, std::string> function_names;
-// std::vector<std::string> function_names;
 
+// This struct contains statistics of the wasm commands execution and the function calls
 struct stats_t {
    // key opcode, value count
    std::unordered_map<int, int> ops_count;
    // key index, value count (index of the function in function table)
    std::unordered_map<int, int> calls_count;
 
-   void print(const module & mod) {
+   void print() {
        opcode_utils u;
        cout << "\nStatistics of operations: \n";
        for(auto i: ops_count) {
@@ -123,10 +128,10 @@ struct stats_t {
    }
 
 // TODO: Indercept the ret command and recognize if the function use a tail call
-
 #define DBG_RET_VISIT(name, code)                                                                                      \
    void operator()(const EOS_VM_OPCODE_T(name)& op) { std::cout << "Found " << #name << "\n"; }
 
+// Implementation of a visitor class which methods are called in process of the wasm interpretation
 template <typename ExecutionCTX>
 struct my_visitor : public interpret_visitor<ExecutionCTX> {
    using interpret_visitor<ExecutionCTX>::operator();
@@ -138,6 +143,9 @@ struct my_visitor : public interpret_visitor<ExecutionCTX> {
 //   EOS_VM_RETURN_OP(DBG_RET_VISIT)
 };
 
+// Implementation of a backend class which used for calling of the interpreted with a custom visitor.
+// The only needs to make this class is implementation of the call method where the custom visitor used
+// Should be better was to call the interpreter with the custon visitor
 template <typename HostFunctions = std::nullptr_t, typename Impl = interpreter, typename Options = default_options, typename DebugInfo = null_debug_info>
 class my_backend {
    using host_t     = detail::host_type_t<HostFunctions>;
@@ -252,6 +260,8 @@ int main(int argc, char** argv) {
    rhf_t::add<&example_host_methods::prints_l>("env", "prints_l");
 
 
+   // As I understand it is a mechanism to limit time of execution of wasm functions to prevent hanging on
+   // infinite loops
     watchdog wd{std::chrono::seconds(3)};
 
     try {
@@ -288,11 +298,10 @@ int main(int argc, char** argv) {
         my_backend_t bkend( code, ehm, &wa );
 
         std::cout << "Execute apply.\n" << endl;
-        // Instantiate a "host"
-        ehm.field = "testing";
+
         // Execute apply.
         bkend.call(ehm, "env", "apply", (uint64_t)0, (uint64_t)0, (uint64_t)0);
-        stats.print(bkend.get_module());
+        stats.print();
    }
    catch ( const eosio::vm::exception& ex ) {
       std::cerr << ex.what() << " : " << ex.detail() <<  "\n";
