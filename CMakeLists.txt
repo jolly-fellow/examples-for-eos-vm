@@ -21,4 +21,7 @@ target_link_libraries(driver eos-vm)
 add_executable(test_driver src/test_driver.cpp)
 target_link_libraries(test_driver eos-vm)
 
+add_executable(test_driver_pres src/test_driver_pres.cpp)
+target_link_libraries(test_driver_pres eos-vm)
+
 add_subdirectory(contracts)
